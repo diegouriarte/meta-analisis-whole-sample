@@ -1,0 +1,178 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+#Load libraries
+
+```{r libraries, message=FALSE, warning=FALSE}
+#install.packages(c("readxl","ggplot2","tidyverse","purrr","knitr","magrittr",
+#"openxlsx","labelled","dplyr","here", "metafor"))
+library(readxl)
+library(tidyverse)
+library(openxlsx)
+library(dplyr)
+library(here)
+library(metafor)
+library(skimr)
+library(foreign)
+library(ggplot2)
+source(file = here("coding-files","functions.R"))
+```
+
+#Load clean datafile
+
+This file assumes that `0_data-cleaning.Rmd` has been previouly run to update rds file
+in data folder.
+
+```{r}
+effects_evaluations <- readRDS(here("data","cleanDatafile.rds")) %>%
+  filter(jovenes!="menor a 25")
+
+```
+#Generate Descriptive Statistics
+
+number of effects, evaluations and papers
+```{r}
+#number of effects
+
+effects_evaluations %>%
+  count()
+
+#number of evaluations
+effects_evaluations %>%
+  select(evaluation_id) %>%
+  distinct() %>%
+  count()
+
+#number of papers
+effects_evaluations %>%
+  select(paper_id) %>%
+  distinct() %>%
+  count()
+
+#there are 41 evaluations and 40 papers, but it is not a correspondence of one on one. There are 5 papers with two evaluations and four evaluations with two papers. We will show how I got to that conclusion
+
+paper_eval<- effects_evaluations %>%
+  select(paper_id , evaluation_id) %>%
+  distinct()
+
+paper_eval %>%
+  group_by(paper_id) %>%
+  summarise(n_eval = n()) %>%
+  count(n_eval)
+
+
+paper_eval %>%
+  count(paper_id) %>%
+  filter(n >1)
+
+paper_eval %>%
+  count(evaluation_id) %>%
+  filter(n >1)
+
+paper_eval %>%
+  group_by(evaluation_id) %>%
+  summarise(n_paper = n()) %>%
+  count(n_paper)
+
+#AQUI BORRAR PAPER_EVAL
+rm(paper_eval)
+```
+  
+Program Length, jovenes, skills, training, implementer
+  
+```{r}
+effects_evaluations %>%
+  select(evaluation_id,length_intervention) %>%
+  distinct() %>%
+  filter(length_intervention == 0)
+#aqui ordenar por length of intervention y luego observar cual es el de mayor y menor lenght
+
+#contar evaluaciones con menores de 25
+effects_evaluations %>%
+  select(evaluation_id, jovenes) %>%
+  distinct()%>%
+  count(jovenes)
+
+effects_evaluations %>%
+  select(evaluation_id, skills) %>%
+  distinct()%>%
+  count(skills)
+
+
+effects_evaluations %>%
+  #select(evaluation_id, nt, implementer) %>%
+  group_by(implementer)%>%
+  summarise(nt=mean(nt))
+
+
+effects_evaluations %>%
+  select(evaluation_id, training) %>%
+  distinct %>%
+  group_by(training)%>%
+  count(training)
+
+effects_evaluations %>%
+  select(evaluation_id, nt, implementer) %>%
+  group_by(implementer) %>%
+  summarise(n=mean(nt))
+```
+length and classroom
+```{r}
+
+
+table(effects_evaluations$training, effects_evaluations$length_intervention2)
+  
+effects_evaluations %>%
+  count(length_intervention2)
+
+summary(effects_evaluations$length_intervention)
+
+effects_evaluations %>%
+  count(outcome_type) %>%
+  filter(outcome_type %in% c(1,2, 4:8))%>%
+  summarise(effects_wages_employ=sum(n))
+
+effects_evaluations %>%
+  count(outcome_type) %>%
+  filter(outcome_type %in% c(2, 4:8))%>%
+  summarise(effects_wages=sum(n))
+
+effects_evaluations %>%
+  filter(outcome_type ==1)%>%
+  count(outcome_type) 
+
+```
+  
+```{r}
+effects_evaluations %>%
+  #select(evaluation_id) %>%
+  distinct(evaluation_id)
+
+anti_join(wages_meta,employment_meta, by="evaluation_id")
+inner_join(wages_meta,employment_meta, by="evaluation_id") %>%
+  arrange(y.x)
+
+
+anti_join(employment_meta,wages_meta, by="evaluation_id")
+
+```
+  
+```{r}
+effects_evaluations %>% 
+  filter(skills == "Technical") %>% 
+  count(evaluation_id) %>%
+  count()
+
+effects_evaluations %>% 
+  filter(skills == "Soft") %>% 
+  count(evaluation_id) %>%
+  count()
+
+effects_evaluations %>% 
+  filter(skills == "Both") %>% 
+  count(evaluation_id) %>%
+  count()
+```
+  
+  

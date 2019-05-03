@@ -1,0 +1,297 @@
+---
+title: "Cleaning excel file"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+# Load libraries
+
+First, we load required libraries for importing and data cleaning
+```{r}
+library(readxl)
+library(tidyverse)
+library(openxlsx)
+library(dplyr)
+library(here)
+library(janitor)
+library(skimr)
+library(stringr)
+library(ggplot2)
+```
+
+# Import file from excel file 
+
+We import two sheets from excel file. Sheet 8.Effects, and sheet 7. Evaluations.
+
+```{r}
+ruta_file <- here("data", "effect-sizes-raw.xlsx")
+effects <- read_excel(ruta_file, sheet = "8. Effects", col_names = TRUE,
+                      na = c("","-")) %>%
+  clean_names() %>% 
+  rename("outcome_type" = outcome_type_10, "outcome_description" = outcome_type_11 )
+#importamos la hoja 7. Evaluations el excel
+evaluations <- read_excel(ruta_file, sheet = "7. Evaluations", col_names = TRUE) %>%
+  clean_names() 
+```
+
+```{r}
+effects %>%
+  filter(outcome_type == 1) %>%
+  distinct(evaluation_id)
+```
+
+# Correct type of variables
+
+Select only required variables from evaluations sheet, and convert categorical variables to factor
+
+```{r tame-evaluations}
+
+evaluations_filter <- evaluations %>%
+  select(paper_id, evaluation_id, 
+         skills = ends_with("technical_soft_job_readiness"),
+         training = ends_with("class_internship"), 
+         jovenes,
+         implementer,
+         where_internship = starts_with("where_is_the_internship"),
+         where_class = starts_with("where_is_the_classroom"),
+         length_class_hours = ends_with("classroom_hours"),
+         length_class_months = ends_with("classroom_months"),
+         length_internship_hours = ends_with("internship_hours"),
+         length_internship_months = ends_with("internship_months"),
+         lac = ends_with("lac") ,
+         decision=type_of_decision ,
+         vulnerable=vulnerable_yes_no,
+         vulnerability_type,
+         holistic) %>%
+  mutate_at(c("skills","training","where_internship","where_class",
+              "jovenes","implementer"), 
+            .fun = parse_factor, levels = NULL)
+
+evaluations_filter <- evaluations_filter %>%
+  mutate(implementer=recode(implementer, government="Government")) 
+
+skim(evaluations_filter)
+
+```
+
+Select only required variables from effects sheet, and convert categorical variables to factor
+
+```{r tame_effects}
+effects_filter <- effects %>%
+  select(paper_id, 
+         evaluation_id:population,
+         months_of_delay:outcome_description,
+         n_total = n, nt:se,
+         t,
+         p_value,
+         se_calculated, 
+         starts_with("smd"),
+         starts_with("vd")) %>%
+  mutate(vd = if_else(is.na(vd_mean), vd_regress, vd_mean),
+         gender = recode_factor(gender, Female = "female",
+                                Pooled = "pooled", Male = "male") ) %>%
+  select(-starts_with("vd_")) 
+
+skim(effects_filter)
+```
+Somehow, `months_of_delay` is categorized as character, let's explore it:
+
+```{r}
+effects_filter %>% 
+  filter(!is.na(months_of_delay)) %>%
+  select(paper_id, months_of_delay) %>%
+  mutate(months_numeric = as.numeric(months_of_delay)) %>%
+  filter(is.na(months_numeric))
+```
+The problem is how Chakravarty 2016 ii and Dyke 2006 i coded its months of delay. Let's change it:
+
+```{r}
+effects_filter <- effects_filter %>%
+  mutate(months_of_delay = replace(months_of_delay, months_of_delay == "9-11", 11),
+         months_of_delay = replace(months_of_delay, months_of_delay == "0-4", 4),
+         months_of_delay = as.numeric(months_of_delay)) 
+
+effects_filter$months_of_delay %>% skim()
+
+
+```
+
+Now, we have outcomes reported between -6 to 156 months (13 years).
+
+
+#Merge datasets (two sheets)
+We merge the two previous datasets by paper_id and evaluation_id:
+
+```{r join-frames}
+effects_evaluations <- effects_filter %>%
+  left_join(evaluations_filter, by= c("paper_id","evaluation_id"))
+
+skim(effects_evaluations)
+```
+Since `age_group` contains information about the age of the group exposed to the effect
+("22-30"), or is `NA` (when the effects is for the whole sample), we extract that information
+to create four new variables, age_min and age_max for the age of the sample for the effect and
+age_min_target and age_max_target for the evaluation.
+
+effects_evaluations <- effects_evaluations %>%
+  mutate(age_min = case_when(grepl("\\d\\d-\\d\\d",age_group) ~ substr(age_group,1,2),
+                             grepl("\\d\\d-",age_group) ~ NA_character_,
+                             grepl("\\d\\d+",age_group) ~ substr(age_group,1,2),
+                             TRUE ~ NA_character_),
+         age_max = case_when(grepl("\\d\\d-\\d\\d",age_group) ~ substr(age_group,4,5),
+                             grepl("\\d\\d-",age_group) ~ substr(age_group,1,2),
+                             grepl("\\d\\d+",age_group) ~ NA_character_,
+                             TRUE ~ NA_character_),
+         age_min_target = case_when(grepl("\\d\\d-\\d\\d",target_age) ~ substr(target_age,1,2),
+                             grepl("\\d\\d-",target_age) ~ NA_character_,
+                             grepl("\\d\\d+",target_age) ~ substr(target_age,1,2),
+                             TRUE ~ NA_character_),
+         age_max_target = case_when(grepl("\\d\\d-\\d\\d",target_age) ~ substr(target_age,4,5),
+                             grepl("\\d\\d-",target_age) ~ substr(target_age,1,2),
+                             grepl("\\d\\d+",target_age) ~ NA_character_,
+                             TRUE ~ NA_character_)) %>%
+  mutate_at(c("age_min_target", "age_max_target", "age_min", "age_max"), parse_number) %>%
+  mutate(age_min = ifelse(is.na(age_group), age_min_target, age_min),
+         age_max = ifelse(is.na(age_group), age_max_target, age_max))
+
+
+effects_evaluations
+
+
+
+
+
+
+Defining when an intervention is long or short depending on how many months in total there were
+
+
+skim(effects_evaluations$length_internship_hours)
+effects_evaluations <- effects_evaluations %>%
+   rowwise()%>% 
+   mutate(length_internship_hours = if_else(is.na(length_internship_hours), 
+                                      length_internship_months*80, 
+                                      length_internship_hours),
+         length_class_hours =if_else(is.na(length_class_hours), 
+                                    length_class_months*80, 
+                                    length_class_hours),
+        length_intervention= sum(length_internship_hours, length_class_hours, na.rm = TRUE))
+
+
+median_length_intervention <- median(effects_evaluations$length_intervention)
+median_length_intervention
+
+
+median_length_interventrion_old <- effects_evaluations %>%
+  filter(jovenes!="menor a 25") %>%
+  pull(length_intervention) %>%
+  median()
+
+effects_evaluations <- effects_evaluations %>%
+   mutate(length_intervention2=if_else(length_intervention<=median_length_intervention, 
+                                      "Less or equal than 480 hours", "More than 480 hours"),
+          length_intervention3=if_else(length_intervention<=median_length_interventrion_old, 
+                                      "Less or equal than 400 hours", "More than 400 hours"))
+
+
+
+
+Now, we create a histogram of how these intervention hours are distributed:
+
+
+plot <- effects_evaluations %>%
+  select(evaluation_id, length_intervention) %>%
+  distinct() %>%
+  ggplot(data = ., aes(length_intervention))+
+  geom_histogram(binwidth = 200)+
+  labs(title = "Distribution of intervention length", 
+       x = "Hours", y = "Count")+
+  theme_minimal()
+
+plot 
+
+ggsave(here("plots","distribution_of_intervention_length.png"), plot = plot)
+
+effects_evaluations %>%
+  select(evaluation_id,length_intervention2 ) %>%
+  distinct() %>%
+  count(length_intervention2)    
+
+
+We modify categories, not including job-readiness since it is always part of 
+technical o soft training.
+
+```{r}
+
+effects_evaluations <- effects_evaluations %>%
+  mutate(skills= recode(skills,soft="Soft",technical="Technical",both="Both",
+                        "technical, job-readniess"= "Technical",
+                        "soft, job-readiness"= "Soft"),
+         training=recode(training,both="Both",classroom="Classroom"),
+         where_internship=recode(where_internship,"private-subsidized"="Private-subsidized",
+                                 private="Private"),
+         where_class=recode(where_class,public="Public",private="Private"),
+         implementer=as.character(implementer),
+        implementer=replace(implementer, implementer=="Multilateral","Mulilateral_NGO"),
+        implementer=replace(implementer, implementer=="NGO","Mulilateral_NGO")) 
+
+```
+
+We perform a difference in means test to check whether there are statiscally significant
+difference between men and women's sample sizes.
+
+```{r}
+t_test <- effects_evaluations %>% 
+  filter(gender != "pooled" ) %>%
+  t.test(formula = n_total ~ gender, data = .)
+
+broom::tidy(t_test) %>%
+  select(difference = estimate, female_mean_N = estimate1, 
+         male_mean_N = estimate2, t = statistic,
+         -parameter, conf.low:alternative) %>%
+  write.xlsx(file = here("tables","t-test-gender.xlsx"))
+```
+Ordering for the forest plot subgroups
+```{r}
+effects_evaluations<-effects_evaluations %>%
+  mutate(skills_order=recode(skills,Soft=1, Technical=2, Both=3),
+         ) 
+```
+
+
+#Save file as RDS
+
+Now, we save the file to be used in following steps
+
+```{r}
+saveRDS(effects_evaluations, file = here("data","cleanDatafile.rds"))
+```
+
+
+```{r}
+effects_evaluations %>%
+  filter(jovenes!="menor a 25",
+         length_intervention == 480) %>%
+  select(evaluation_id,starts_with("length")) %>%
+  distinct()
+  
+effects_evaluations$outcome[effects_evaluations$outcome_type ==1 ] <- "Employment"
+effects_evaluations$outcome[effects_evaluations$outcome_type ==3 ] <- "Formality"
+effects_evaluations$outcome[effects_evaluations$outcome_type %in% c(2,8) ] <- "Wages all"
+effects_evaluations$outcome[effects_evaluations$outcome_type %in% c(4,5,6,7) ] <- "Wages employed"
+
+effects_evaluations%>%
+  count(outcome, outcome_type)
+
+effects_evaluations%>%
+  filter(jovenes!="menor a 25") %>%
+  count(outcome)
+
+effects_evaluations%>%
+  filter(jovenes!="menor a 25") %>%
+  count()
+
+hist(effects_evaluations$age_max_target)
+skim(effects_evaluations$age_max_target)
+```
+

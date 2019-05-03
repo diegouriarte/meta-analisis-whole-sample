@@ -1,0 +1,225 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+#Load libraries
+
+```{r libraries, message=FALSE, warning=FALSE}
+#install.packages(c("readxl","ggplot2","tidyverse","purrr","knitr","magrittr",
+#"openxlsx","labelled","dplyr","here", "metafor"))
+library(readxl)
+library(tidyverse)
+library(openxlsx)
+library(dplyr)
+library(here)
+library(metafor)
+library(skimr)
+library(foreign)
+source(file = here("coding-files","functions.R"))
+```
+
+#Load clean datafile
+
+This file assumes that `0_data-cleaning.Rmd` has been previously run to update rds file in data folder.
+
+```{r}
+effects_evaluations <- readRDS(here("data","cleanDatafile.rds")) 
+#%>%  filter(jovenes!="menor a 25")
+
+```
+
+#Constructions of dataset with evaluations, effects and SE
+
+## Are there estimates with gender == "pooled" but age_group != NA?
+First, let's find out if there are estimates that are provided for `gender == "pooled"` but 
+`age_group` is `NA`, that means that is for the whole sample.
+
+```{r}
+outcome_wage <- c(2,4,5,6,7,8)
+df1 <- effects_evaluations %>%
+  filter(outcome_type %in% outcome_wage,
+         is.na(age_group), 
+         gender == "pooled") %>%
+  select(1,2) %>%
+  distinct()
+
+df2 <- effects_evaluations %>%
+  filter(outcome_type %in% outcome_wage,
+         gender == "pooled") %>%
+  select(1,2) %>%
+  distinct()
+
+anti_join(df2, df1, by = c("paper_id", "evaluation_id"))
+anti_join(df1, df2, by = c("paper_id", "evaluation_id"))
+
+rm(df1, df2)
+```
+```{r}
+wages_ver <- effects_evaluations %>%
+  filter(outcome_type %in% outcome_wage,
+         gender == "pooled",
+         is.na(age_group)) %>%
+  arrange(evaluation_id,paper_id,outcome_type, months_of_delay) %>%
+  select(-age_group)
+```
+
+## Calculate effects for pooled gender and pooled age
+
+Now, we add to a dataset the combined effect for evaluations that have one or more effects type wage (2,4,5,6,7,8). We only consider effects for `gender == "pooled"` and for the whole sample (`age_group == NA`)
+
+To combine the effect across different `months_of_delay`, we use the function 
+`combineEffectsAcrossTime` with correlation equal to `0.5`.
+
+```{r}
+wages_meta <- effects_evaluations %>%
+  filter(outcome_type %in% outcome_wage) %>%
+  combineEffectsPooled()
+
+wages_meta
+```
+
+
+## Are there effects not reported for gender == "pooled" and is.na(age_group)
+We want to find the effects that are reported separated for women and men, and not aggregated. Also, we want this  effects to be for the whole sample in regard to age (that is `age_group == NA`)
+
+First, we find the effects without pool estimate
+
+```{r papers-without-pool}
+effects_evaluations %>%
+  filter(outcome_type %in% outcome_wage) %>%
+  GetListGenderOnly()
+
+```
+
+From this group of evaluations, we want to make sure that there are effects for the whole sample in regard to age:
+
+```{r}
+effects_gender_all_ages <- effects_evaluations %>%
+  filter(outcome_type %in% outcome_wage, 
+         evaluation_id %in% pull(evaluation_female_or_male),
+         is.na(age_group)) %>%
+  select(2) %>%
+  distinct() 
+
+anti_join(evaluation_female_or_male, effects_gender_all_ages, by="evaluation_id")
+
+```
+
+
+From this, there is a problematic paper (GAO 1996), that provides independent estimates for males and females, and for different age ranges, not for the whole sample. 
+
+We will deal with GAO separately.
+
+Now, we need to have only one estimate for each gender/paper_id/evaluation_id,
+
+```{r}
+effects_collapsed_by_gender <- effects_evaluations %>%
+  filter(outcome_type %in% outcome_wage) %>%
+  CollapseByGender()
+
+effects_collapsed_by_gender 
+```
+
+## Combine male and female estimates
+Now, we combine male and female estimates:
+
+```{r}
+effects_evaluation_with_gender <- effects_evaluations %>%
+  filter(outcome_type %in% outcome_wage) %>%
+  CombineGenderSyn()
+
+effects_evaluation_with_gender
+
+```
+
+We combine with the previous table:
+
+```{r}
+wages_meta <- effects_evaluations %>%
+  filter(outcome_type %in% outcome_wage) %>%
+  CollapseMeta()
+
+wages_meta
+```
+
+
+Now, we deal with GAO 1996. First, we collapse by age_group and gender:
+
+
+```{r}
+gao_summary <- effects_evaluations %>%
+  filter(evaluation_id == "GAO 1996",
+         outcome_type %in% outcome_wage) %>%
+  group_by(evaluation_id, gender, age_group) %>%
+  summarise(beta_combined_delay = combineEffectsAcrossTime(smd_treated_control, sqrt(vd))[1],
+            se_combined_delay = combineEffectsAcrossTime(smd_treated_control, sqrt(vd))[2],
+            number_effects = n()) %>%
+  group_by(evaluation_id) %>%
+  summarise(y = combineEffectsGender(beta_combined_delay, se_combined_delay)[1],
+            se = combineEffectsGender(beta_combined_delay, se_combined_delay)[2],
+            number_effects = sum(number_effects))  %>%
+  mutate( gender = "s.pooled") %>%
+  select(1, gender, 2:4)
+
+gao_summary
+
+wages_meta <- wages_meta %>% 
+  bind_rows(gao_summary) %>%
+  mutate(gender = parse_factor(gender))
+
+wages_meta
+```
+
+# Saving the file to database for Stata
+```{r}
+wages_meta_categories <- wages_meta %>%
+  left_join(effects_evaluations %>%
+            select(evaluation_id, skills:where_class,
+                   #length_intervention2,length_intervention3,
+                   skills_order, lac) %>%
+            distinct(),by = "evaluation_id")
+
+wages_meta_categories
+
+write.dta(wages_meta_categories, file = here("data","wages_meta_categories.dta"),
+          convert.factors = "string")
+```
+
+# We now divide between wages registered for all people, and only conditional on working
+
+
+```{r warning=FALSE}
+meta_work <- effects_evaluations %>%
+  filter(outcome_type %in% c(2, 8)) %>%
+  CollapseMeta() %>% #CollapseMeta() calculate mean effect sizes for each evaluation
+  bind_rows(gao_summary) %>% #we add Gao evaluation, since it is calculated in a different way
+  mutate(conditional_work = "All") %>%
+  bind_rows(
+    effects_evaluations %>%
+    filter(outcome_type %in% c(4:7)) %>%
+    CollapseMeta() %>%
+    # we add mean effect sizes for ev. wages conditional on employment
+    mutate(conditional_work = "Employed")
+    ) 
+
+```
+
+## Saving dta with column conditional on working
+
+```{r}
+wages_meta_work <- meta_work %>%
+  left_join(effects_evaluations %>%
+            select(evaluation_id, skills:where_class,
+                   #length_intervention2,length_intervention3,
+                   skills_order, lac) %>%
+            distinct(),by = "evaluation_id")
+
+wages_meta_work
+
+write.dta(wages_meta_work, file = here("data","wages_meta_work.dta"),
+          convert.factors = "string")
+```
+
+
+

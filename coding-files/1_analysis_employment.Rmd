@@ -1,0 +1,278 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+#Load libraries
+
+```{r libraries, message=FALSE, warning=FALSE}
+#install.packages(c("readxl","ggplot2","tidyverse","purrr","knitr","magrittr",
+#"openxlsx","labelled","dplyr","here", "metafor"))
+library(readxl)
+library(tidyverse)
+library(openxlsx)
+library(dplyr)
+library(here)
+library(metafor)
+library(skimr)
+library(foreign)
+source(file = here("coding-files","functions.R"))
+```
+
+#Load clean datafile
+
+This file assumes that `0_data-cleaning.Rmd` has been previouly run to update rds file
+in data folder.
+
+```{r}
+effects_evaluations <- readRDS(here("data","cleanDatafile.rds"))
+  #filter(jovenes!="menor a 25")
+
+effects_evaluations %>%
+  filter(outcome_type == 1) %>%
+  distinct(evaluation_id)
+```
+
+#Constructions of dataset with evaluations, effects and SE
+
+
+## Are there estimates with gender == "pooled" but age_group != NA?
+First, let's find out if there are estimates that are provided for `gender == "pooled"` but 
+`age_group` is `NA`, that means that is for the whole sample.
+
+```{r}
+df1 <- effects_evaluations %>%
+  filter(outcome_type == 1,
+         is.na(age_group), 
+         gender == "pooled") %>%
+  select(1,2) %>%
+  distinct()
+
+df2 <- effects_evaluations %>%
+  filter(outcome_type == 1,
+         gender == "pooled") %>%
+  select(1,2) %>%
+  distinct()
+
+anti_join(df2, df1, by = c("paper_id", "evaluation_id"))
+anti_join(df1, df2, by = c("paper_id", "evaluation_id"))
+
+rm(df1, df2)
+```
+```{r}
+dfx<- effects_evaluations %>%
+  filter(outcome_type == 1)
+hist(dfx$beta)
+```
+
+All papers that have gender == "pooled" also provide an estimate for the whole sample in age. 
+
+## Collapse evaluations with gender pooled and age pooled
+
+Now, we add to a dataset the combined effect for evaluations that have one or more effects type 1. We only consider effects for `gender == "pooled"` and for the whole sample (`age_group == NA`)
+
+To combine the effect accross different `months_of_delay`, we use the function 
+`combineEffectsAcrossTime` with correlation equal to `0.5`.
+```{r}
+#ver como son los efectos a combinar en orden de tiempo
+ employment_ver <- effects_evaluations %>%
+  filter(outcome_type == 1,
+         gender == "pooled",
+         is.na(age_group)) %>%
+  arrange(evaluation_id,paper_id, months_of_delay)
+```
+
+```{r}
+employment_meta <- effects_evaluations %>%
+  filter(outcome_type == 1,
+         gender == "pooled",
+         is.na(age_group)) %>%
+  group_by(evaluation_id) %>%
+  summarise(y = combineEffectsAcrossTime(y = beta, se = se_calculated)[1], 
+            se = combineEffectsAcrossTime(y = beta, se = se_calculated)[2],
+            number_effects = n())
+
+employment_meta <- employment_meta %>% 
+  mutate(gender = "pooled") %>%
+  select(evaluation_id, gender, y:number_effects)
+
+employment_meta
+```
+
+
+## Are there effects not reported for gender == "pooled" and is.na(age_group)
+We want to find the effects that are reported separated for women and men, and not aggregated. Also, we want these  effects to be for the whole sample in regard to age (that is `age_group == NA`)
+
+First, we find the effects without pool estimate
+
+```{r papers-without-pool}
+df1 <- effects_evaluations %>%
+  filter(outcome_type == 1, gender == "pooled") %>%
+  select(evaluation_id) %>%
+  distinct()
+
+df2 <- effects_evaluations %>%
+  filter(outcome_type == 1, gender %in% c("male","female")) %>%
+  select(evaluation_id) %>%
+  distinct()
+
+evaluation_female_or_male <- anti_join(df2,df1, by ="evaluation_id") 
+evaluation_female_or_male
+
+```
+
+From this group of evaluations, we want to make sure that there are effects for the 
+whole sample in regard to age:
+
+```{r}
+effects_gender_all_ages <- effects_evaluations %>%
+  filter(outcome_type == 1, 
+         evaluation_id %in% pull(evaluation_female_or_male),
+         is.na(age_group)) %>%
+  select(2) %>%
+  distinct() 
+
+anti_join(evaluation_female_or_male, effects_gender_all_ages, by="evaluation_id")
+
+```
+
+From this, there is a problematic paper (GAO 1996), that provides independent estimates
+for males and females, and for different age ranges, not for the whole sample. 
+We will deal with GAO separately.
+
+## Collapsing by effects by gender and creating a pooled estimated
+
+Now, we need to have only one estimate for each gender/paper_id/evaluation_id,
+
+```{r}
+effects_collapsed_by_gender <- effects_evaluations %>%
+  filter(outcome_type == 1, 
+         evaluation_id %in% pull(evaluation_female_or_male),
+         is.na(age_group)) %>%
+  group_by(evaluation_id, gender) %>%
+  summarise(beta = combineEffectsAcrossTime(y = beta, se = se_calculated)[1], 
+            se = combineEffectsAcrossTime(y = beta, se = se_calculated)[2],
+            number_effects = n()) 
+
+effects_collapsed_by_gender
+```
+
+
+```{r}
+effects_evaluation_with_gender <- effects_collapsed_by_gender %>%
+  group_by(evaluation_id) %>%
+  mutate(y_pooled = combineEffectsGender(y = beta, se = se)[1], 
+         se_pooled = combineEffectsGender(y = beta, se = se)[2],
+         total_number_effects = sum(number_effects)) %>%
+  ungroup() %>%
+  mutate(gender_evaluation = ifelse(total_number_effects == number_effects, as.character(gender), "s.pooled"),
+         gender_evaluation = parse_factor(gender_evaluation)) %>%
+  select(-gender,-beta,-se) %>%
+  distinct() %>%
+  select(evaluation_id,
+         gender = gender_evaluation,
+         y = y_pooled, 
+         se = se_pooled, 
+         number_effects = total_number_effects ) 
+
+effects_evaluation_with_gender
+```
+
+We combine with the previous table:
+
+```{r}
+employment_meta <- employment_meta %>% 
+  bind_rows(effects_evaluation_with_gender) %>%
+  mutate(gender = parse_factor(gender))
+
+employment_meta
+```
+
+## Dealing with GAO 1996
+
+Now, we deal with GAO 1996. First, we collapse by age_group and gender:
+
+
+```{r}
+gao_summary <- effects_evaluations %>%
+  filter(evaluation_id == "GAO 1996",
+         outcome_type == 1) %>%
+  group_by(evaluation_id, gender, age_group) %>%
+  summarise(beta_combined_delay = combineEffectsAcrossTime(beta, se_calculated)[1],
+            se_combined_delay = combineEffectsAcrossTime(beta, se_calculated)[2],
+            number_effects = n()) %>%
+  group_by(evaluation_id) %>%
+  summarise(y = combineEffectsGender(beta_combined_delay, se_combined_delay)[1],
+            se = combineEffectsGender(beta_combined_delay, se_combined_delay)[2],
+            number_effects = sum(number_effects))  %>%
+  mutate( gender = "s.pooled") %>%
+  select(1, gender, 2:4)
+
+gao_summary
+
+employment_meta <- employment_meta %>% 
+  bind_rows(gao_summary) %>%
+  mutate(gender = parse_factor(gender))
+
+employment_meta
+```
+
+
+
+# Create DTA file to continue analysis in Stata
+
+```{r}
+employment_meta_categories <- employment_meta %>%
+  left_join(
+    effects_evaluations %>%
+      select(
+      evaluation_id,
+      skills:where_class,
+      #length_intervention2,
+      #length_intervention3,
+      #length_intervention,
+      skills_order,
+      lac,
+      
+      ) %>%
+      distinct(),
+  by = "evaluation_id"
+  )
+  
+  employment_meta_categories
+  
+  write.dta(
+    employment_meta_categories,
+    file = here("data", "employment_meta_categories_v2.dta"),
+    convert.factors = "string"
+    )
+
+```
+
+## Create Scatter plot lenght intervention and employment
+
+
+employment_meta_categories %>% 
+  ggplot2::ggplot(data = ., aes(x = length_intervention, y = y)) +
+  ggplot2::geom_point() +
+  ggplot2::geom_vline(xintercept = 480) +
+  labs(x = "Length of intervention (hours)", y = "Change of probability of employment") +
+  ggplot2::theme_minimal()
+
+ggplot2::ggsave(filename = here("plots", "scatter_length_intervention.pdf"))
+
+
+# Meta-analysis
+
+
+df2 <- employment_meta_categories %>% filter(implementer == "Government")  
+count(df2)  
+random_meta <- rma(yi = y, sei = se, data = employment_meta_categories, measure = "GEN",
+                   slab = evaluation_id)
+forest(random_meta, xlim = c(-0.8,0.5))
+op <- par(cex = 0.75, font = 2)
+text(-0.8, 36, "Evaluation ID", pos = 4)
+text(0.2, 36, "Change in probability of employment", pos = 2)
+text(0.5, 36, "[95% CI]", pos = 2)
+
+

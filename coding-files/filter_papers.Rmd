@@ -1,0 +1,186 @@
+---
+title: "R Notebook"
+output:
+  word_document: default
+  html_notebook:
+    code_folding: hide
+---
+
+## Load packages
+
+```{r include=FALSE}
+library(here)
+library(readxl)
+library(janitor)
+library(tidyverse)
+library(forcats)
+library(kableExtra)
+library(knitr)
+```
+```{r include=FALSE}
+excel_diego <- read_excel(here("reports", "Papers_revision_28ene19_d.xlsx"), 
+                      sheet = "Hoja1", col_names = TRUE,
+                      na = c("")) %>%
+  clean_names() %>%
+  filter(randomization != "Brenda")
+
+
+excel_brenda <- read_excel(here("reports", "Papers_revision_28ene19_b.xlsx"), 
+                          sheet = "Hoja1", col_names = TRUE,
+                          na = c("")) %>%
+  clean_names() %>%
+  filter(randomization != "Diego")
+
+excel_carlos <- read_excel(here("reports", "papers_original_carlos.xlsx"), 
+                          sheet = "6. Papers", col_names = TRUE,
+                          na = c("")) %>%
+  clean_names()
+```
+
+
+## We found differences in classification
+
+
+```{r include=FALSE}
+both_diego <- excel_diego %>% 
+  select(paper_id, filter_4_paper_1_dropped,randomization) %>%
+  filter(randomization == "D & B") %>%
+  select(-randomization)
+```
+
+```{r include=FALSE}
+both_brenda <- excel_brenda %>% 
+  select(paper_id, filter_4_paper_1_dropped,randomization) %>%
+  filter(randomization == "D & B") %>%
+  select(-randomization)
+
+```
+
+
+```{r include=FALSE}
+comparison <- both_diego %>% inner_join(both_brenda, by = "paper_id",
+                          suffix = c("_diego", "_brenda")) %>%
+  mutate(diff = filter_4_paper_1_dropped_diego - filter_4_paper_1_dropped_brenda)
+
+comparison %>%  count(diff)
+```
+
+### Papers that were classified differently.
+
+```{r echo=FALSE}
+comparison %>% filter(diff != 0) %>%
+  select(paper_id) %>%
+kable(format = "pandoc")
+```
+
+## Papers dropped and included
+
+
+```{r include=FALSE}
+#combine filter criteria by Diego and Brenda
+excel_both <- excel_brenda %>%
+  filter(randomization == "Brenda") %>%
+  bind_rows(excel_diego)
+```
+
+```{r echo=FALSE}
+excel_both %>% 
+  count(filter_4_paper_1_dropped) %>%
+  mutate(filter_4_paper_1_dropped = ifelse(filter_4_paper_1_dropped == 0,
+                                           "Included", "Dropped")) %>%
+  rename("Criteria" = filter_4_paper_1_dropped) %>%
+  kable(format = "pandoc")
+```
+
+### Distribution of included papers
+```{r echo=FALSE}
+
+temp <- excel_brenda %>% 
+  filter(filter_4_paper_1_dropped == 0) %>%
+  count(randomization)
+
+excel_diego %>% filter(filter_4_paper_1_dropped == 0) %>%
+  count(randomization) %>% 
+  bind_rows(temp[1,]) %>%
+  kable(format = "pandoc")
+
+```
+
+
+## Reasons to drop papers
+
+```{r echo = FALSE}
+order_label <- c("Other", "Population", "Intervention", 
+                 "Methods","Measures","Duplicate")
+table_excluded <- excel_both %>%
+  filter(filter_4_paper_1_dropped == 1) %>%
+  mutate(reason2drop = case_when(
+                            other == 1 ~ "Other",
+                            population == 1 ~ "Population",
+                            intervention == 1 ~ "Intervention",
+                            methods == 1 ~ "Methods",
+                            measures == 1 ~ "Measures",
+                            filter_1_duplicates_1_dropped == 1 ~ "Duplicate",
+                            TRUE ~ NA_character_
+  )) %>%
+  select(paper_id, other, population, intervention, methods, measures, reason2drop) %>%
+  count(reason2drop)
+
+
+addition <- data_frame(c("Other","Population"), c(0,0))
+addition <- `colnames<-`(addition, c("reason2drop", "n"))
+
+table_excluded %>% bind_rows(addition) %>%
+  mutate(reason2drop = as.factor(reason2drop),
+         reason2drop = fct_relevel(reason2drop,
+                                   "Other", "Population","Intervention",
+                                   "Methods", "Measures", "Duplicate")) %>%
+  arrange(reason2drop) %>%
+  kable(format = "pandoc")
+  
+
+```
+
+## Additional charactheristics of included papers
+
+```{r echo = FALSE}
+p1 <- excel_both %>%
+  filter(filter_4_paper_1_dropped == 0) %>%
+  count(private_job_subsidized) %>% 
+  spread(key = "private_job_subsidized", value = n) %>%
+  rename("Yes" = `1`, "No" = `0` ) %>%
+  mutate(Characteristic = "Private job subsidized")
+
+p2 <- excel_both %>%
+  filter(filter_4_paper_1_dropped == 0) %>%
+  count(public_job_subsidized) %>% 
+  spread(key = "public_job_subsidized", value = n) %>%
+  rename("No" = `0` ) %>%
+  mutate(Characteristic = "Public job subsidized")
+
+p3 <- excel_both %>%
+  filter(filter_4_paper_1_dropped == 0) %>%
+  count(psm_did) %>% 
+  spread(key = "psm_did", value = n) %>%
+  rename("Yes" = `1`, "No" = `0` ) %>%
+  mutate(Characteristic = "PSM Diff-in-Diff")
+
+p4 <- excel_both %>%
+  filter(filter_4_paper_1_dropped == 0) %>%
+  count(holistic_programs) %>% 
+  spread(key = "holistic_programs", value = n) %>%
+  rename("Yes" = `1`, "No" = `0` ) %>%
+  mutate(Characteristic = "Holistic Programs")
+
+bind_rows(p1,p2,p3,p4) %>%
+  mutate(Yes = ifelse(is.na(Yes),0,Yes)) %>%
+  select(Characteristic, Yes, No) %>%
+  kable(format = "pandoc")
+```
+
+
+```{r}
+excel_both %>%
+  write_excel_csv(path = here("reports","summary-filter.csv"))
+```
+
